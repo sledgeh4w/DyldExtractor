@@ -1414,6 +1414,10 @@ class _StubFixer(object):
 								continue
 
 							elif stubFormat == _StubFormat.AuthStubNormal:
+								if symbolIndex == INDIRECT_SYMBOL_LOCAL:
+									# No fix needed
+									continue
+
 								# only need to relink symbol pointer
 								symPtrOff = self._dyldCtx.convertAddr(symPtrAddr)[0]
 

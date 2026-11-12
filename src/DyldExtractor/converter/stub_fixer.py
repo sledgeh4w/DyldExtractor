@@ -439,6 +439,26 @@ class Arm64Utilities(object):
 		self._resolveCache[address] = target
 		return target
 
+	def resolveStubChainPath(self, address: int) -> List[int]:
+		"""Follow a stub chain and record every hop.
+
+		Args:
+			address: The address of the stub.
+
+		Returns:
+			Every address on the chain, including the start address
+			and the final target.
+		"""
+
+		hops: List[int] = [address]
+		target = address
+
+		while stubData := self.resolveStub(target):
+			target = stubData[0]
+			hops.append(target)
+
+		return hops
+
 	def resolveStub(self, address: int) -> Tuple[int, _StubFormat]:
 		"""Get the stub and its format.
 
@@ -1517,11 +1537,27 @@ class _StubFixer(object):
 
 			# find the matching stub for the branch
 			brTargetFunc = self._arm64Utils.resolveStubChain(brTarget)
-			if not (funcSymbols := self._symbolizer.symbolizeAddr(brTargetFunc)):
+			funcSymbols = self._symbolizer.symbolizeAddr(brTargetFunc) or []
+			stubSymbol = next((sym for sym in funcSymbols if sym in stubMap), None)
+
+			if not stubSymbol:
+				# The chain end may not be exported on arm64e;
+				# the symbol can be attached to any hop.
+				for hop in self._arm64Utils.resolveStubChainPath(brTarget):
+					hopSymbols = self._symbolizer.symbolizeAddr(hop)
+					if not hopSymbols:
+						continue
+
+					stubSymbol = next((sym for sym in hopSymbols if sym in stubMap), None)
+					if stubSymbol:
+						funcSymbols = hopSymbols
+						break
+
+			if not stubSymbol:
 				# Sometimes there are bytes of data in the text section
 				# that match the bl and b filter, these seem to follow a
 				# BR or other branch, skip these.
-				lastInstTop = textFile.file[instrOff + 3] & 0xFC
+				lastInstTop = textFile.file[instrOff - 1] & 0xFC
 				if (
 					lastInstTop == 0x94  # bl
 					or lastInstTop == 0x14  # b
@@ -1529,21 +1565,10 @@ class _StubFixer(object):
 				):
 					continue
 
-				self._logger.warning(f"Unable to symbolize branch at {hex(brAddr)}, targeting {hex(brTargetFunc)}")  # noqa
-				continue
-
-			stubSymbol = next((sym for sym in funcSymbols if sym in stubMap), None)
-			if not stubSymbol:
-				# Same as above
-				lastInstTop = textFile.file[instrOff + 3] & 0xFC
-				if (
-					lastInstTop == 0x94  # bl
-					or lastInstTop == 0x14  # b
-					or lastInstTop == 0xD6  # br
-				):
-					continue
-
-				self._logger.warning(f"Unable to find a stub for branch at {hex(brAddr)}, potential symbols: {funcSymbols}")  # noqa
+				if not funcSymbols:
+					self._logger.warning(f"Unable to symbolize branch at {hex(brAddr)}, targeting {hex(brTargetFunc)}")  # noqa
+				else:
+					self._logger.warning(f"Unable to find a stub for branch at {hex(brAddr)}, potential symbols: {funcSymbols}")  # noqa
 				continue
 
 			# repoint the branch to the stub
